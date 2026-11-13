@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="zh"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>K-pop 签售追踪</title>
+<style>
+  :root{--b:#e23b6b;--bg:#0f1115;--card:#171a21;--mut:#8a93a3;--line:#262b36;--up:#46d17f}
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:var(--bg);color:#e7ebf2}
+  .wrap{max-width:1100px;margin:0 auto;padding:18px}
+  h1{font-size:21px;margin:4px 0}h2{font-size:16px;margin:18px 0 8px}
+  .sub{color:var(--mut);font-size:13px;margin-bottom:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+  .ev{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:13px;cursor:pointer;transition:.15s}
+  .ev:hover{border-color:var(--b);transform:translateY(-1px)}
+  .badge{font-size:11px;padding:2px 8px;border-radius:20px}
+  .live{background:#143a26;color:var(--up)} .ended{background:#3a2330;color:#ff9eb3} .upcoming{background:#23303a;color:#8ab4ff}
+  .plat{font-size:12px;color:var(--mut)}
+  .row{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:4px 0}
+  label{color:var(--mut);font-size:13px;margin-right:5px}
+  input{background:#0d1016;border:1px solid var(--line);color:#e7ebf2;border-radius:8px;padding:7px 9px;font-size:14px;width:78px}
+  button{background:#222734;color:#cdd5e2;border:0;border-radius:8px;padding:8px 12px;font-size:13px;cursor:pointer}
+  .back{background:none;color:#8ab4ff;padding:4px 0}
+  table{border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:6px 9px;border-bottom:1px solid var(--line);white-space:nowrap}
+  th{color:var(--mut);font-weight:500}
+  .summary{width:100%}
+  .rng{color:#ffd166;font-weight:700}.easy{color:var(--up)}.up{color:var(--up)}.muted{color:var(--mut);font-size:12px}
+  .scroll{overflow:auto;max-height:440px;border:1px solid var(--line);border-radius:8px}
+  .scroll table{width:100%}.scroll th{position:sticky;top:0;background:#1b1f27}
+  .tcol{position:sticky;left:0;background:var(--card)}
+  .unsup{opacity:.55}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--up);margin-right:5px;animation:p 2s infinite}
+  @keyframes p{50%{opacity:.3}}
+  a{color:#8ab4ff;text-decoration:none}
+</style></head>
+<body><div class="wrap">
+  <h1>K-pop 签售实时追踪</h1>
+  <div class="sub"><span class="dot"></span><span id="status">加载中…</span> · 每分钟自动刷新</div>
+
+  <div class="card">
+    <div class="row">
+      <span><label>中签名额 S</label><input id="slots" type="number" value="30" min="1"></span>
+      <span><label>集中度 φ</label><input id="plo" type="number" value="0.55" step="0.05"> ~ <input id="phi" type="number" value="0.75" step="0.05"></span>
+      <span><label>大单阈值</label><input id="thr" type="number" value="10" min="1">本</span>
+      <label><input type="checkbox" id="onlyChanges"> 仅看有交易单</label>
+      <label><input type="checkbox" id="showAll"> 明细显示全部历史</label>
+      <button id="refreshBtn">🔄 立即刷新</button>
+      <span class="muted">建议区间=φ·N/S(稳健) · 大单拆解仅清淡时段近似、高峰失真</span>
+    </div>
+  </div>
+
+  <div id="view"></div>
+</div>
+
+<script>
+const OWNER="aaazha686-oss", REPO="ktown4u-fansign-tracker", BRANCH="main";
+const $=id=>document.getElementById(id);
+let INDEX=null, timer=null;
+
+async function txt(path){
+  // 优先同源(GitHub Pages,每次提交后~1分钟部署、认防缓存参数,平滑不憋数据);
+  // 失败再退回 raw(本地 file:// 打开时用)。
+  try{
+    const r=await fetch(`${path}?_=${Date.now()}`,{cache:'no-store'});
+    if(r.ok) return r.text();
+  }catch(e){}
+  const r2=await fetch(`https://raw.githubusercontent.com/${OWNER}/${REPO}/${BRANCH}/${path}?_=${Date.now()}`,{cache:'no-store'});
+  if(!r2.ok) throw new Error(path+' '+r2.status); return r2.text();
+}
+function tshort(iso){
+  const d=new Date(iso);
+  if(isNaN(d)) return iso.slice(5,19).replace('T',' ');
+  return d.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+}
+// K4 活动日期是韩国时间(KST,+09:00),转成北京时间(+08:00)显示
+function bjTime(s){
+  if(!s) return '?';
+  const iso=s.trim().replace(' ','T').replace(/\.\d+$/,'')+'+09:00';
+  const d=new Date(iso);
+  if(isNaN(d)) return s.slice(0,16);
+  return d.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
+}
+const dcell=d=> d==null?'<span class="muted">·</span>' : d>0?`<span class="up">+${d}</span>` : d<0?`<span style="color:#ff7a7a">${d}</span>`:'<span class="muted">+0</span>';
+const params=()=>({S:Math.max(1,+$('slots').value||1),plo:+$('plo').value||0.55,phi:+$('phi').value||0.75,thr:Math.max(1,+$('thr').value||10)});
+
+function parseCSV(t){const L=t.trim().split(/\r?\n/);L.shift();const rows=[];for(const ln of L){const c=ln.split(',');if(c.length<3)continue;rows.push({t:c[0],member:c[1],sales:+c[2],delta:c[3]===''?null:+c[3]});}return rows;}
+
+async function refresh(){
+  try{ INDEX=JSON.parse(await txt('data/index.json')); }
+  catch(e){ $('status').textContent='加载 index 失败:'+e.message; return; }
+  // 各平台抓取器写入索引的时间 -> 用来判断数据是否新鲜(而不是用浏览器当前时间)
+  const stamps=[INDEX.updatedAt];
+  // 合并 musicndrama(独立的 mnd_index.json,替换占位的未接入块)
+  try{
+    const mnd=JSON.parse(await txt('data/mnd_index.json'));
+    if(mnd&&mnd.platform){ const i=INDEX.platforms.findIndex(p=>p.id==='musicndrama');
+      if(i>=0) INDEX.platforms[i]=mnd.platform; else INDEX.platforms.push(mnd.platform); }
+    if(mnd&&mnd.updatedAt) stamps.push(mnd.updatedAt);
+  }catch(e){}
+  // 合并 fanme(独立的 fanme_index.json)
+  try{
+    const fm=JSON.parse(await txt('data/fanme_index.json'));
+    if(fm&&fm.platform){ const i=INDEX.platforms.findIndex(p=>p.id==='fanme');
+      if(i>=0) INDEX.platforms[i]=fm.platform; else INDEX.platforms.push(fm.platform); }
+    if(fm&&fm.updatedAt) stamps.push(fm.updatedAt);
+  }catch(e){}
+  // 显示真实"数据时间"(最新一个抓取器写入时间),并在断更时红色告警
+  const ms=stamps.filter(Boolean).map(s=>Date.parse(s)).filter(n=>!isNaN(n));
+  const last=ms.length?Math.max(...ms):0;
+  if(last){
+    const bj=new Date(last).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
+    const ago=Math.round((Date.now()-last)/1000);
+    if(ago>300){
+      const mins=Math.floor(ago/60);
+      $('status').innerHTML='<span style="color:#ff5252;font-weight:700">⚠️ 数据已 '+mins+' 分钟未更新('+bj+')</span>';
+    }else{
+      $('status').textContent='数据更新于 '+bj+'(北京) · '+ago+'秒前';
+    }
+  }else{
+    $('status').textContent='更新于 '+new Date().toLocaleTimeString();
+  }
+  route();
+}
+function route(){
+  const h=location.hash.slice(1)||'/';
+  if(h.startsWith('/event/')) showEvent(h.split('/')[2]); else showHome();
+}
+window.addEventListener('hashchange',route);
+
+function evCard(p,e){
+  return `<div class="ev" onclick="location.hash='#/event/${e.eventNo}'">
+    <div class="row" style="justify-content:space-between"><span class="plat">${p.name} · #${e.eventNo}</span>
+      <span class="badge ${e.status}">${({live:'🟢进行中',ended:'已结束',upcoming:'未开始'})[e.status]||e.status}</span></div>
+    <div style="font-weight:700;margin:4px 0">${e.title||('活动 '+e.eventNo)}</div>
+    <div class="muted">🕒 ${bjTime(e.start)} → ${bjTime(e.end)} (北京)</div>
+    <div class="muted">总盘 ${e.total??'—'} · ${e.members??'?'} 个成员/类型 ${e.hasSummary?'· 📄有总结':''}</div>
+  </div>`;
+}
+function showHome(){
+  if(!INDEX){ return; }
+  let html='';
+  for(const p of INDEX.platforms){
+    const evs=p.events||[];
+    html+=`<h2>${p.name} ${p.supported?'':'<span class="badge ended">未接入</span>'}</h2>`;
+    if(!p.supported){ html+=`<div class="card unsup muted">${p.reason||'暂不支持'}</div>`; continue; }
+    if(!evs.length){ html+='<div class="card muted">暂无在售签售(或刚启动还没发现)</div>'; continue; }
+    const active=evs.filter(e=>e.status!=='ended'), ended=evs.filter(e=>e.status==='ended');
+    if(active.length) html+='<div class="grid">'+active.map(e=>evCard(p,e)).join('')+'</div>';
+    else html+='<div class="muted" style="margin-bottom:8px">暂无进行中/未开始的活动</div>';
+    if(ended.length){
+      html+=`<div class="seclabel" style="margin-top:10px">📁 已结束活动(${ended.length})— 仍保留全部销量记录</div>`
+        +'<div class="grid">'+ended.map(e=>evCard(p,e)).join('')+'</div>';
+    }
+  }
+  $('view').innerHTML=html;
+}
+
+async function showEvent(eno){
+  const meta=findEvent(eno)||{eventNo:eno,title:'活动 '+eno,status:'?'};
+  let rows=[]; try{ rows=parseCSV(await txt(`data/track_${eno}.csv`)); }catch(e){}
+  const {S,plo,phi,thr}=params();
+  const byTime={}, byMember={};
+  for(const r of rows){ (byTime[r.t]=byTime[r.t]||{})[r.member]=r; (byMember[r.member]=byMember[r.member]||[]).push(r); }
+  const times=Object.keys(byTime), members=Object.keys(byMember);
+  const lastRow=times.length?byTime[times[times.length-1]]:{};
+  const order=members.slice().sort((a,b)=>(lastRow[b]?.sales||0)-(lastRow[a]?.sales||0));
+  const minN=order.length?Math.min(...order.map(m=>lastRow[m]?.sales||0)):0;
+
+  let html=`<button class="back" onclick="location.hash='#/'">← 返回全部活动</button>
+    <div class="card"><div class="row" style="justify-content:space-between">
+      <div><span style="font-size:18px;font-weight:700">${meta.title||eno}</span>
+        <span class="plat"> · ${meta.platform||'ktown4u'} · #${eno}</span></div>
+      <span class="badge ${meta.status}">${({live:'🟢进行中',ended:'已结束',upcoming:'未开始'})[meta.status]||meta.status}</span></div>
+      <div class="muted" style="margin-top:4px">🕒 开始 ${bjTime(meta.start)} → 结束 ${bjTime(meta.end)}(北京时间)</div>`;
+  if(meta.status==='ended') html+='<div class="muted">活动已结束,以下是保留的全部销量记录。</div>';
+  html+='</div>';
+
+  if(!rows.length){ html+='<div class="card muted">暂无数据(刚开始抓 或 活动已归档无销量)。</div>'; $('view').innerHTML=html; return; }
+
+  // 大单拆解(实验·仅清淡时段近似):把 >=阈值 的正增量当“一笔主单”,排序取前 S
+  const decomp=m=>{ const big=byMember[m].map(r=>r.delta).filter(d=>d!=null&&d>=thr).sort((a,b)=>b-a);
+    if(!big.length) return {cnt:0}; const top=big.slice(0,S); const cut=big[Math.min(S,big.length)-1];
+    const med=top.slice().sort((a,b)=>a-b)[Math.floor((top.length-1)/2)]; return {cnt:big.length,cut,med}; };
+
+  // 汇总 + 建议
+  html+='<div class="card"><b>各成员当前/最终销量 + 建议下单</b><table class="summary"><thead><tr><th>成员/类型</th><th>总盘 N</th><th>近增量</th><th>建议区间(φ·N/S)</th><th>大单拆解 cut/中位 ⚠️</th></tr></thead><tbody>';
+  for(const m of order){ const N=lastRow[m]?.sales||0, lo=Math.round(plo*N/S), hi=Math.round(phi*N/S), dc=decomp(m);
+    const rng=N<S?'人人能中(1本)':`<span class="rng">${lo} ~ ${hi} 本</span>`;
+    const dctxt=dc.cnt?`cut≈${dc.cut} / 中位≈${dc.med} (${dc.cnt}笔≥${thr})`:'<span class="muted">无≥阈值的增量</span>';
+    html+=`<tr><td class="${N===minN?'easy':''}">${m}</td><td>${N}</td><td>${dcell(lastRow[m]?.delta)}</td><td>${rng}</td><td class="muted">${dctxt}</td></tr>`; }
+  html+=`</tbody></table><div class="muted" style="margin-top:6px">✅ <b>以「建议区间 φ·N/S」为准</b>(稳健)。<br>⚠️ <b>大单拆解列仅供眼看参考</b>:增量大小=距上次刷新的订单合计——清淡时≈单笔(小增量),高峰时是多人合并的大跳,会把“一群人”误判成“一笔主单”,**高峰期失真**。</div></div>`;
+
+  // 明细筛选:① 仅看有交易单(只留增量≠0) ② 显示全部历史 ③ 默认=有变化的+最近300
+  const onlyChanges=$('onlyChanges').checked, showAll=$('showAll').checked;
+  const hasTxn=t=>Object.values(byTime[t]).some(r=>r.delta!=null&&r.delta!==0);
+  let showTimes;
+  if(onlyChanges){ showTimes=times.filter(hasTxn); }
+  else if(showAll){ showTimes=times.slice(); }
+  else{ const recent=new Set(times.slice(-300)); showTimes=times.filter(t=>recent.has(t)||hasTxn(t)); }
+  const show=showTimes.reverse();
+  const modeText = onlyChanges?'(仅有交易单)' : showAll?'(全部历史)' : '= 有增量变化的 + 最近300条';
+  html+='<div class="card"><b>📋 抓取明细(北京时间 × 各成员 总量(增量))</b><div class="scroll"><table><thead><tr><th class="tcol">时间(北京)</th>'
+    +order.map(m=>`<th>${m}</th>`).join('')+'</tr></thead><tbody>'
+    +show.map(t=>`<tr><td class="tcol">${tshort(t)}</td>`+order.map(m=>{const r=byTime[t][m];return r?`<td>${r.sales} <span style="font-size:12px">(${dcell(r.delta)})</span></td>`:'<td class="muted">—</td>';}).join('')+'</tr>').join('')
+    +`</tbody></table></div><div class="muted" style="margin-top:6px">显示 ${show.length} 条 ${modeText}。所有记录都完整存在仓库 CSV 里。</div></div>`;
+  $('view').innerHTML=html;
+}
+function findEvent(eno){ if(!INDEX)return null; for(const p of INDEX.platforms){ for(const e of (p.events||[])){ if(e.eventNo===String(eno)){ return {...e,platform:p.name}; } } } return null; }
+
+['slots','plo','phi','thr'].forEach(id=>$(id).oninput=route);
+$('showAll').onchange=route; $('onlyChanges').onchange=route;
+$('refreshBtn').onclick=()=>{ const b=$('refreshBtn'); b.textContent='⏳ 刷新中…'; refresh().finally(()=>{ setTimeout(()=>b.textContent='🔄 立即刷新',300); }); };
+refresh(); timer=setInterval(refresh,20000);
+</script>
+</body></html>
